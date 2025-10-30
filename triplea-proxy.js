@@ -21,21 +21,40 @@ let tokenExpiry = 0;
 // Hàm lấy access token Triple-A (có cache ngắn hạn)
 async function getAccessToken() {
   if (accessToken && tokenExpiry > Date.now()) return accessToken;
-  const res = await fetch('https://api.triple-a.io/v3/oauth/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      client_id: CLIENT_ID,
-      client_secret: CLIENT_SECRET,
-      audience: 'https://api.triple-a.io/v3/',
-      grant_type: 'client_credentials'
-    })
-  });
-  const data = await res.json();
-  if (!data.access_token) throw new Error('Cannot get Triple-A token: ' + JSON.stringify(data));
-  accessToken = data.access_token;
-  tokenExpiry = Date.now() + ((data.expires_in || 3600) * 1000) - 60000;
-  return accessToken;
+
+  // Một số tài liệu Triple-A dùng các endpoint token khác nhau theo môi trường.
+  // Thử lần lượt để tránh lỗi 405 MethodNotAllowed.
+  const tokenUrls = [
+    'https://api.triple-a.io/oauth/token',
+    'https://api.triple-a.io/v3/oauth/token',
+    'https://auth.triple-a.io/oauth/token'
+  ];
+
+  let lastErr = null;
+  for (const url of tokenUrls) {
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          client_id: CLIENT_ID,
+          client_secret: CLIENT_SECRET,
+          audience: 'https://api.triple-a.io/v3/',
+          grant_type: 'client_credentials'
+        })
+      });
+      const data = await res.json();
+      if (res.ok && data.access_token) {
+        accessToken = data.access_token;
+        tokenExpiry = Date.now() + ((data.expires_in || 3600) * 1000) - 60000;
+        return accessToken;
+      }
+      lastErr = data;
+    } catch (e) {
+      lastErr = String(e);
+    }
+  }
+  throw new Error('Cannot get Triple-A token: ' + JSON.stringify(lastErr));
 }
 
 // Tạo payment/invoice Triple-A
