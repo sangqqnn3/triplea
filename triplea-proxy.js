@@ -3,10 +3,12 @@ import express from 'express';
 import fetch from 'node-fetch';
 import bodyParser from 'body-parser';
 import dotenv from 'dotenv';
+import cors from 'cors';
 
 dotenv.config(); // Đọc biến môi trường từ file .env
 
 const app = express();
+app.use(cors());
 app.use(bodyParser.json());
 
 const CLIENT_ID = process.env.TRIPLEA_CLIENT_ID;
@@ -48,19 +50,23 @@ app.post('/api/triplea/payment', async (req, res) => {
         'Authorization': `Bearer ${token}`
       },
       body: JSON.stringify({
-        merchant_key: MERCHANT_KEY,
+        merchant_key: req.body.merchant_key || MERCHANT_KEY,
         order_id: req.body.order_id,
-        amount: req.body.amount,
+        amount: Number(req.body.amount),
         currency: req.body.currency || 'USD',
         description: req.body.description || 'Shop Payment',
-        success_url: req.body.success_url || 'https://sangqqnn3.github.io/',
-        fail_url: req.body.cancel_url || 'sangqqnn3.github.io/shopfreestyle/payout.html',
+        success_url: req.body.success_url || 'https://yourdomain.com/',
+        fail_url: req.body.cancel_url || 'https://yourdomain.com/payout.html',
         // Thêm callback_url nếu cần xác nhận tự động (webhook)
-        callback_url: req.body.callback_url || 'https://sangqqnn3.github.io/api/triplea/webhook'
+        callback_url: req.body.callback_url || 'https://yourdomain.com/api/triplea/webhook'
       })
     });
     const data = await paymentRes.json();
-    res.status(paymentRes.status).json(data);
+    if (!paymentRes.ok) {
+      console.error('Triple-A payment error:', data);
+      return res.status(paymentRes.status).json(data);
+    }
+    res.status(200).json(data);
   } catch (error) {
     res.status(500).json({ error: 'Backend Triple-A proxy error', detail: String(error) });
   }
@@ -75,4 +81,8 @@ app.post('/api/triplea/webhook', (req, res) => {
   res.sendStatus(200);
 });
 
-app.listen(3001, () => console.log('Triple-A proxy backend listening on port 3001'));
+// Healthcheck simple
+app.get('/healthz', (req, res) => res.send('ok'));
+
+// Render/Railway sẽ đặt PORT qua biến môi trường
+app.listen(process.env.PORT || 3000, () => console.log('Triple-A proxy backend up'));
