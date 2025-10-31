@@ -22,72 +22,107 @@ let tokenExpiry = 0;
 async function getAccessToken() {
   if (accessToken && tokenExpiry > Date.now()) return accessToken;
 
-  // Một số tài liệu Triple-A dùng các endpoint token khác nhau theo môi trường.
-  // Thử lần lượt để tránh lỗi 405 MethodNotAllowed.
-  const tokenUrls = [
-    'https://api.triple-a.io/oauth/token',
-    'https://api.triple-a.io/v3/oauth/token',
-    'https://auth.triple-a.io/oauth/token'
-  ];
-
-  let lastErr = null;
-  for (const url of tokenUrls) {
-    try {
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          client_id: CLIENT_ID,
-          client_secret: CLIENT_SECRET,
-          audience: 'https://api.triple-a.io/v3/',
-          grant_type: 'client_credentials'
-        })
-      });
-      const data = await res.json();
-      if (res.ok && data.access_token) {
-        accessToken = data.access_token;
-        tokenExpiry = Date.now() + ((data.expires_in || 3600) * 1000) - 60000;
-        return accessToken;
-      }
-      lastErr = data;
-    } catch (e) {
-      lastErr = String(e);
-    }
+  if (!CLIENT_ID || !CLIENT_SECRET) {
+    throw new Error('Missing TRIPLEA_CLIENT_ID or TRIPLEA_CLIENT_SECRET in environment variables');
   }
-  throw new Error('Cannot get Triple-A token: ' + JSON.stringify(lastErr));
+
+  // Triple-A OAuth endpoint chính thức
+  const tokenUrl = 'https://api.triple-a.io/v3/oauth/token';
+  
+  try {
+    console.log('Requesting Triple-A access token...');
+    const res = await fetch(tokenUrl, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+      },
+      body: JSON.stringify({
+        client_id: CLIENT_ID,
+        client_secret: CLIENT_SECRET,
+        audience: 'https://api.triple-a.io/v3/',
+        grant_type: 'client_credentials'
+      })
+    });
+    
+    const data = await res.json();
+    
+    if (!res.ok) {
+      console.error('Triple-A token error:', data);
+      throw new Error(`Token request failed: ${res.status} - ${JSON.stringify(data)}`);
+    }
+    
+    if (!data.access_token) {
+      throw new Error('No access_token in response: ' + JSON.stringify(data));
+    }
+    
+    accessToken = data.access_token;
+    tokenExpiry = Date.now() + ((data.expires_in || 3600) * 1000) - 60000;
+    console.log('Triple-A access token obtained successfully');
+    return accessToken;
+  } catch (error) {
+    console.error('Triple-A token fetch error:', error);
+    throw new Error('Cannot get Triple-A token: ' + String(error));
+  }
 }
 
 // Tạo payment/invoice Triple-A
 app.post('/api/triplea/payment', async (req, res) => {
   try {
+    console.log('Received payment request:', {
+      order_id: req.body.order_id,
+      amount: req.body.amount,
+      currency: req.body.currency
+    });
+    
     const token = await getAccessToken();
-    // Đọc info order từ body hoặc test cứng tại đây (tùy nhu cầu)
+    console.log('Access token obtained, creating payment...');
+    
+    const paymentPayload = {
+      merchant_key: req.body.merchant_key || MERCHANT_KEY,
+      order_id: req.body.order_id,
+      amount: Number(req.body.amount),
+      currency: req.body.currency || 'USD',
+      description: req.body.description || 'Shop Payment',
+      success_url: req.body.success_url || 'https://yourdomain.com/',
+      fail_url: req.body.cancel_url || 'https://yourdomain.com/payout.html',
+      callback_url: req.body.callback_url || 'https://yourdomain.com/api/triplea/webhook'
+    };
+    
+    console.log('Sending payment request to Triple-A:', paymentPayload);
+    
     const paymentRes = await fetch('https://api.triple-a.io/v3/payments', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      body: JSON.stringify({
-        merchant_key: req.body.merchant_key || MERCHANT_KEY,
-        order_id: req.body.order_id,
-        amount: Number(req.body.amount),
-        currency: req.body.currency || 'USD',
-        description: req.body.description || 'Shop Payment',
-        success_url: req.body.success_url || 'https://yourdomain.com/',
-        fail_url: req.body.cancel_url || 'https://yourdomain.com/payout.html',
-        // Thêm callback_url nếu cần xác nhận tự động (webhook)
-        callback_url: req.body.callback_url || 'https://yourdomain.com/api/triplea/webhook'
-      })
+      body: JSON.stringify(paymentPayload)
     });
+    
     const data = await paymentRes.json();
+    
     if (!paymentRes.ok) {
-      console.error('Triple-A payment error:', data);
+      console.error('Triple-A payment API error:', {
+        status: paymentRes.status,
+        response: data
+      });
       return res.status(paymentRes.status).json(data);
     }
+    
+    console.log('Payment created successfully:', {
+      order_id: data.order_id,
+      payment_url: data.payment_url || data.redirect_url
+    });
+    
     res.status(200).json(data);
   } catch (error) {
-    res.status(500).json({ error: 'Backend Triple-A proxy error', detail: String(error) });
+    console.error('Payment endpoint error:', error);
+    res.status(500).json({ 
+      error: 'Backend Triple-A proxy error', 
+      detail: String(error),
+      message: error.message 
+    });
   }
 });
 
@@ -100,8 +135,34 @@ app.post('/api/triplea/webhook', (req, res) => {
   res.sendStatus(200);
 });
 
+// Route test server
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    service: 'Triple-A Proxy',
+    endpoints: {
+      payment: 'POST /api/triplea/payment',
+      webhook: 'POST /api/triplea/webhook',
+      health: 'GET /healthz'
+    },
+    env_check: {
+      has_client_id: !!CLIENT_ID,
+      has_client_secret: !!CLIENT_SECRET,
+      has_merchant_key: !!MERCHANT_KEY
+    }
+  });
+});
+
 // Healthcheck simple
 app.get('/healthz', (req, res) => res.send('ok'));
 
 // Render/Railway sẽ đặt PORT qua biến môi trường
-app.listen(process.env.PORT || 3000, () => console.log('Triple-A proxy backend up'));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log('Triple-A proxy backend up on port', PORT);
+  console.log('Environment check:', {
+    has_client_id: !!CLIENT_ID,
+    has_client_secret: !!CLIENT_SECRET,
+    has_merchant_key: !!MERCHANT_KEY
+  });
+});
